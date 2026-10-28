@@ -16,6 +16,8 @@ pub(crate) fn start_stream(stream: &impl cpal::traits::StreamTrait) -> bool {
 /// A built output stream and the channels and fault flag its callback shares with the player.
 pub(crate) struct Opened {
     pub(crate) stream: cpal::Stream,
+    /// The configuration the stream runs with (its buffer size may differ from the attempt's).
+    pub(crate) config: cpal::StreamConfig,
     pub(crate) tx: Sender<Cmd>,
     pub(crate) grx: Receiver<Vec<Box<dyn Plugin>>>,
     pub(crate) fault: Arc<Fault>,

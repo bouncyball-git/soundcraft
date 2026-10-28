@@ -186,6 +186,23 @@ pub(crate) fn buffer_size(want: Option<u32>, supported: &cpal::SupportedBufferSi
     }
 }
 
+/// ASIO drivers take buffer sizes only in steps (`min`, `min + step`, …), and cpal reports the
+/// step only in the message of the `UnsupportedConfig` error that refuses another size. The valid
+/// size nearest `want` (ties go up: fewer dropouts), or `None` when `e` is not that refusal.
+pub(crate) fn stepped_buffer_size(want: cpal::BufferSize, e: &cpal::Error) -> Option<cpal::BufferSize> {
+    let cpal::BufferSize::Fixed(want) = want else { return None };
+    if e.kind() != cpal::ErrorKind::UnsupportedConfig {
+        return None;
+    }
+    let (_, rest) = e.message()?.split_once("sizes must start at ")?;
+    let (min, step) = rest.split_once(" and increment by ")?;
+    let min = min.trim().parse::<u32>().ok()?;
+    let step = step.trim().parse::<u32>().ok().filter(|s| *s > 0)?;
+    let steps = want.saturating_sub(min).saturating_add(step / 2) / step;
+    let size = min.checked_add(steps.checked_mul(step)?)?;
+    (size != want).then_some(cpal::BufferSize::Fixed(size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +286,29 @@ mod tests {
         assert_eq!(buffer_size(Some(32), &r), cpal::BufferSize::Default);
         assert_eq!(buffer_size(Some(4096), &r), cpal::BufferSize::Default);
         assert_eq!(buffer_size(None, &r), cpal::BufferSize::Default);
+    }
+
+    #[test]
+    fn a_stepped_asio_buffer_refusal_picks_the_nearest_valid_size() {
+        use cpal::BufferSize::Fixed;
+        // cpal 0.18's wording for a driver whose sizes go 48, 96, 144, …
+        let refused =
+            cpal::Error::with_message(cpal::ErrorKind::UnsupportedConfig, "Buffer size 128 is not valid; sizes must start at 48 and increment by 48");
+        assert_eq!(stepped_buffer_size(Fixed(128), &refused), Some(Fixed(144)));
+        assert_eq!(stepped_buffer_size(Fixed(110), &refused), Some(Fixed(96)));
+        assert_eq!(stepped_buffer_size(Fixed(120), &refused), Some(Fixed(144)), "a tie goes up");
+        assert_eq!(stepped_buffer_size(Fixed(16), &refused), Some(Fixed(48)), "below the minimum");
+        assert_eq!(stepped_buffer_size(Fixed(96), &refused), None, "already valid: nothing new to try");
+        assert_eq!(stepped_buffer_size(cpal::BufferSize::Default, &refused), None);
+        // Other refusals and other kinds are not a step.
+        let range = cpal::Error::with_message(cpal::ErrorKind::UnsupportedConfig, "Buffer size 9000 is not in the supported range 48..=4096");
+        assert_eq!(stepped_buffer_size(Fixed(9000), &range), None);
+        let busy = cpal::Error::with_message(cpal::ErrorKind::DeviceBusy, "sizes must start at 48 and increment by 48");
+        assert_eq!(stepped_buffer_size(Fixed(128), &busy), None);
+        let zero = cpal::Error::with_message(cpal::ErrorKind::UnsupportedConfig, "sizes must start at 48 and increment by 0");
+        assert_eq!(stepped_buffer_size(Fixed(128), &zero), None);
+        let huge = cpal::Error::with_message(cpal::ErrorKind::UnsupportedConfig, "sizes must start at 4294967295 and increment by 7");
+        assert_eq!(stepped_buffer_size(Fixed(128), &huge), Some(Fixed(u32::MAX)));
         assert_eq!(buffer_size(Some(128), &cpal::SupportedBufferSize::Unknown), cpal::BufferSize::Fixed(128));
         assert_eq!(buffer_size(Some(1 << 20), &cpal::SupportedBufferSize::Unknown), cpal::BufferSize::Default);
         let d = DeviceInfo {

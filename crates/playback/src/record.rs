@@ -256,8 +256,17 @@ impl Recorder {
             cpal::SampleFormat::I16 => build_input::<i16>(&device, config, &shared, &monitor),
             _ => build_input::<f32>(&device, config, &shared, &monitor),
         };
-        // The chosen buffer size first; if the device refuses it, its default.
-        let stream = match build(config) {
+        // The chosen buffer size first; a driver that takes sizes only in steps gets the nearest
+        // one it accepts; if the device refuses those, its default.
+        let mut built = build(config);
+        if let Err(e) = &built
+            && let Some(buffer_size) = crate::devices::stepped_buffer_size(config.buffer_size, e)
+        {
+            log::info!("{e}; trying {buffer_size:?}");
+            config.buffer_size = buffer_size;
+            built = build(config);
+        }
+        let stream = match built {
             Ok(s) => s,
             Err(e) if config.buffer_size != cpal::BufferSize::Default => {
                 log::warn!("cannot open the input with buffer {:?}: {e}; using the device default", config.buffer_size);

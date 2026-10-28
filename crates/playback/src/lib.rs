@@ -230,26 +230,37 @@ impl Player {
                 if config.buffer_size != cpal::BufferSize::Default {
                     attempts.push(cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..config });
                 }
+                let build_one = |config: cpal::StreamConfig| -> Result<Opened, cpal::Error> {
+                    let rate = config.sample_rate;
+                    let channels = usize::from(config.channels);
+                    let (tx, rx) = channel();
+                    let (gtx, grx) = channel();
+                    let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
+                    let fault = Arc::new(Fault::default());
+                    let stream = match format {
+                        cpal::SampleFormat::I32 => build_output::<i32>(&device, config, state, channels, &fault, &shared),
+                        cpal::SampleFormat::I16 => build_output::<i16>(&device, config, state, channels, &fault, &shared),
+                        _ => build_output::<f32>(&device, config, state, channels, &fault, &shared),
+                    }?;
+                    Ok(Opened { stream, config, tx, grx, fault })
+                };
                 let opened = first_started(
                     attempts,
-                    |config: &cpal::StreamConfig| -> Result<Opened, cpal::Error> {
-                        let rate = config.sample_rate;
-                        let channels = usize::from(config.channels);
-                        let (tx, rx) = channel();
-                        let (gtx, grx) = channel();
-                        let state = AudioState::new(rx, Arc::clone(&shared), Arc::clone(&session), f64::from(rate), gtx);
-                        let fault = Arc::new(Fault::default());
-                        let stream = match format {
-                            cpal::SampleFormat::I32 => build_output::<i32>(&device, *config, state, channels, &fault, &shared),
-                            cpal::SampleFormat::I16 => build_output::<i16>(&device, *config, state, channels, &fault, &shared),
-                            _ => build_output::<f32>(&device, *config, state, channels, &fault, &shared),
-                        }?;
-                        Ok(Opened { stream, tx, grx, fault })
+                    // A driver that takes sizes only in steps gets the nearest one it accepts.
+                    |config: &cpal::StreamConfig| match build_one(*config) {
+                        Err(e) => match devices::stepped_buffer_size(config.buffer_size, &e) {
+                            Some(buffer_size) => {
+                                log::info!("{e}; trying {buffer_size:?}");
+                                build_one(cpal::StreamConfig { buffer_size, ..*config })
+                            }
+                            None => Err(e),
+                        },
+                        built => built,
                     },
                     |opened| start_stream(&opened.stream),
                 );
                 match opened {
-                    Some((config, Opened { stream, tx, grx, fault })) => {
+                    Some((_, Opened { stream, config, tx, grx, fault })) => {
                         let rate = config.sample_rate;
                         let channels = usize::from(config.channels);
                         let buffer = match config.buffer_size {
