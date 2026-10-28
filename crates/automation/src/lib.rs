@@ -211,12 +211,19 @@ impl Remote {
     }
 }
 
+/// How long to wait for a remote host to accept a connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(800);
+/// The same for this machine. Windows retries a refused loopback connection for about two
+/// seconds before reporting it, so a shorter wait turns "refused" into "timed out".
+const LOOPBACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Connects to `addr` (`host:port`), trying each address it resolves to.
 fn connect(addr: &str) -> Result<Connection, RemoteError> {
     let socks = addr.to_socket_addrs().map_err(|source| RemoteError::Resolve { addr: addr.to_owned(), source })?;
     let mut last = None;
     for sock in socks {
-        match TcpStream::connect_timeout(&sock, Duration::from_millis(800)) {
+        let timeout = if sock.ip().is_loopback() { LOOPBACK_CONNECT_TIMEOUT } else { CONNECT_TIMEOUT };
+        match TcpStream::connect_timeout(&sock, timeout) {
             Ok(s) => {
                 s.set_read_timeout(Some(Duration::from_secs(120)))?;
                 let r = s.try_clone()?;
@@ -269,6 +276,16 @@ mod tests {
         let e = r.request("session.inspect", json!({})).unwrap_err();
         assert!(matches!(e, RemoteError::Unreachable { .. }), "{e:?}");
         assert!(e.to_string().starts_with("cannot reach SoundCraft at 127.0.0.1:1: "), "{e}");
+    }
+
+    /// Regression: on Windows a refused loopback connection takes about two seconds to report,
+    /// and the 800 ms remote timeout turned it into "connection timed out".
+    #[test]
+    fn remote_reports_a_refused_loopback_connection_as_refused() {
+        let mut r = Remote::new(&ControlTarget { host: Some("127.0.0.1".into()), port: 1 });
+        let e = r.request("session.inspect", json!({})).unwrap_err();
+        let RemoteError::Unreachable { source, .. } = &e else { panic!("{e:?}") };
+        assert_eq!(source.kind(), io::ErrorKind::ConnectionRefused, "{e}");
     }
 
     #[test]
