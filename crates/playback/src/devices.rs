@@ -362,8 +362,14 @@ pub(crate) fn host(cfg: &AudioConfig) -> cpal::Host {
 /// The named output (or input) device of `host`, else its default device.
 pub(crate) fn device(host: &cpal::Host, name: Option<&str>, output: bool) -> Option<cpal::Device> {
     if let Some(want) = name {
-        let found = if output { host.output_devices().ok() } else { host.input_devices().ok() }
-            .and_then(|mut ds| ds.find(|d| device_name(d).as_deref() == Some(want)));
+        let found = if host.id().name() == ASIO {
+            // By id, which loads only this driver: searching the list loads every driver listed
+            // before it, and a driver that refuses to open on its own may tell the user so.
+            host.device_by_id(&cpal::DeviceId::new(host.id(), want)).filter(|d| if output { d.supports_output() } else { d.supports_input() })
+        } else {
+            if output { host.output_devices().ok() } else { host.input_devices().ok() }
+                .and_then(|mut ds| ds.find(|d| device_name(d).as_deref() == Some(want)))
+        };
         if found.is_some() {
             return found;
         }
