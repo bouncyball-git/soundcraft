@@ -307,8 +307,8 @@ impl Player {
                             buffer.map_or("default".to_string(), |n| n.to_string())
                         );
                         if asio {
-                            // A driver whose size is set in its own settings may report a new one.
-                            devices::update_held_asio_buffers(&name);
+                            // Its details, for the listing (ASIO drivers are not probed to list them).
+                            devices::remember_open_asio_device(&device);
                         }
                         Player {
                             shared,

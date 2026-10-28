@@ -25,25 +25,11 @@ impl SoundApp {
         Ok(())
     }
 
-    /// Re-list the audio systems and devices (Setup › Playback Engine › Refresh devices). An
-    /// ASIO driver in use blocks probing any other (ASIO lets a process load one driver), so then
-    /// the devices close for the listing and reopen after it, at the same position; that is
-    /// refused while recording. Without ASIO in use, nothing closes.
+    /// Re-list the audio systems and devices (Setup › Playback Engine › Refresh devices). ASIO
+    /// drivers are found by their registered names without loading any, so nothing closes, not
+    /// even while recording; a driver's details show once it has been opened.
     pub fn rescan_audio_devices(&mut self) -> Result<Vec<soundcraft_playback::devices::AudioSystem>, String> {
-        if !self.player.as_ref().is_some_and(Player::is_asio) {
-            return Ok(soundcraft_playback::devices::audio_systems());
-        }
-        if self.engine.transport.recording {
-            return Err("stop recording before refreshing the devices: the ASIO driver in use closes while they are listed".into());
-        }
-        let at = self.position();
-        if self.is_playing() {
-            self.stop_play();
-        }
-        self.close_audio();
-        let systems = soundcraft_playback::devices::audio_systems();
-        self.open_audio(at);
-        Ok(systems)
+        Ok(soundcraft_playback::devices::audio_systems())
     }
 
     /// Close the output and input devices. The player's plugin instances go away with it; their

@@ -25,7 +25,7 @@ fn the_audio_device_choice_is_kept_only_when_it_is_applied() {
     assert!(err.contains("one driver"), "{err}");
     assert_eq!(app.ui.audio, before, "refused: nothing changes");
 
-    // Refresh lists the devices again; with no ASIO driver in use nothing closes, even while recording.
+    // Refresh only lists the devices again (ASIO drivers by name): nothing closes, even while recording.
     app.engine.transport.recording = true;
     let r = app.run("ui.audio_device", json!({"refresh": true})).unwrap();
     assert!(r["systems"].is_array(), "{r}");

@@ -471,7 +471,9 @@ fn device_combo(ui: &mut egui::Ui, id: &str, name: &str, value: &mut Option<Stri
     let combo = craft_ui::ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
         ui.selectable_value(value, None, format!("Default ({default})"));
         for d in devices {
-            ui.selectable_value(value, Some(d.name.clone()), format!("{} ({} ch)", d.name, d.max_channels));
+            // A driver known by name only (not opened yet) has no channel count to show.
+            let label = if d.has_details() { format!("{} ({} ch)", d.name, d.max_channels) } else { d.name.clone() };
+            ui.selectable_value(value, Some(d.name.clone()), label);
         }
     });
     combo.response.accessible_name(name);
@@ -541,7 +543,9 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             }
             let out = sys.and_then(|s| chosen_device(&s.outputs, draft.output.as_deref()));
             ui.label("Sample rate");
-            number_combo(ui, "pe-rate", "Sample rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz", None);
+            // A driver not opened yet: the usual rates (its own show once it has run).
+            let rates = out.map(|d| d.sample_rates.clone()).filter(|r| !r.is_empty()).unwrap_or_else(|| soundcraft_playback::devices::STANDARD_RATES.to_vec());
+            number_combo(ui, "pe-rate", "Sample rate", &mut draft.sample_rate, &rates, "Hz", None);
             ui.end_row();
             ui.label("Buffer size");
             match out.and_then(DeviceInfo::fixed_buffer) {
@@ -563,7 +567,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let hint = "List the audio devices again. With an ASIO driver in use, audio stops for a moment while every driver is checked.";
+            let hint = "Look for newly connected audio devices. ASIO drivers are found by name without opening them; a driver's details show once it has been applied.";
             if ui.button("Refresh devices").on_hover_text(hint).clicked() {
                 refresh = true;
             }
@@ -694,8 +698,7 @@ fn engine_rows(
 /// `{system?, output?, input?, sample_rate?, buffer_size?}` (a `null` value means "default") sets
 /// the choice and reopens the devices. Under ASIO the input is the output's driver (one driver per
 /// process): a different `input` is refused. `{refresh: true}` lists them again like Refresh
-/// devices (an ASIO driver in use closes for it and reopens; refused while recording). Always
-/// returns the choice and the open device.
+/// devices (ASIO drivers by name, none loaded). Always returns the choice and the open device.
 pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::Value;
     let mut changed = false;
@@ -733,7 +736,7 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
     });
     let mut out = json!({"config": app.ui.audio, "device": device});
     if p.get("refresh").and_then(Value::as_bool).unwrap_or(false) {
-        // Like Refresh devices: an ASIO driver in use closes while every device is probed.
+        // Like Refresh devices.
         out["systems"] = json!(app.rescan_audio_devices()?);
         out["device"] = json!(app.player.as_ref().map(|pl| {
             json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})

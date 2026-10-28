@@ -107,9 +107,6 @@ pub(crate) fn open_device(
     use cpal::traits::DeviceTrait;
     let host = devices::host(cfg);
     let asio = host.id().name() == devices::ASIO;
-    if asio {
-        devices::remember_asio_listing();
-    }
     let device = devices::device(&host, cfg.output.as_deref(), true).ok_or_else(|| "no output device".to_string())?;
     let name = devices::device_name(&device).unwrap_or_else(|| "Audio device".into());
     // Prefer a config at the chosen (else session) rate; else the device default (we resample).

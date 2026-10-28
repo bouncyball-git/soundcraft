@@ -95,6 +95,19 @@ impl std::fmt::Display for AsioError {
 
 impl std::error::Error for AsioError {}
 
+/// The ASIO drivers registered on this machine, by name, in registry order. Reads the registry
+/// only: no driver is loaded, and the one loaded now (if any) is left alone.
+pub fn driver_names() -> Vec<String> {
+    #[cfg(all(windows, target_env = "msvc"))]
+    {
+        asio_sys::Asio::new().driver_names()
+    }
+    #[cfg(not(all(windows, target_env = "msvc")))]
+    {
+        Vec::new()
+    }
+}
+
 /// The loaded driver's buffer sizes.
 pub fn loaded_buffer_sizes() -> Result<BufferSizes, AsioError> {
     #[cfg(all(windows, target_env = "msvc"))]
