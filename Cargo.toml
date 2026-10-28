@@ -92,6 +92,11 @@ debug = 0
 
 # Keep the complete egui family and native event bridge on reviewed fork commits.
 [patch.crates-io]
+# cpal 0.18.2 + the ASIO latency deadlock fix, from the local cpal fork clone (branch
+# fix/asio-latency-deadlock-0.18 in ../cpal-0.18), until a cpal release carries it. asio-sys is
+# patched with it so cpal and soundcraft-asio-host share one copy of the ASIO SDK code.
+cpal = { path = "../cpal-0.18" }
+asio-sys = { path = "../cpal-0.18/asio-sys" }
 ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
 epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
