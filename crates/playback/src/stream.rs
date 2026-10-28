@@ -72,17 +72,24 @@ where
             }
         },
         // cpal may call this on the audio thread (on ALSA in a loop while the device stays
-        // broken): marked, so the logger hands the record off instead of writing it.
+        // broken): marked while it runs, so the logger hands the record off instead of writing it.
+        // An ASIO driver may call it on the UI thread, so the mark is undone afterwards.
         move |e: cpal::Error| {
-            mark_audio_thread();
-            // cpal 0.18 uses one error type for every operation. A device that went away, or a
-            // stream that must be rebuilt (`StreamInvalidated`), stops playback until the user
-            // reconnects; a rerouted default device (`DeviceChanged`) keeps playing on the new
-            // route, and an xrun is transient, so neither counts as losing the stream.
-            if devices::stream_lost(&e) {
-                gone.gone.store(true, Ordering::Relaxed);
-            }
-            log::warn!("audio stream error: {e}");
+            crate::while_audio_thread(|| {
+                // cpal 0.18 uses one error type for every operation. A device that went away, or a
+                // stream that must be rebuilt (`StreamInvalidated`), stops playback until the user
+                // reconnects; a rerouted default device (`DeviceChanged`) keeps playing on the new
+                // route, and an xrun is transient, so neither counts as losing the stream.
+                if devices::stream_lost(&e) {
+                    // `StreamInvalidated`: the device is still there but wants the stream rebuilt
+                    // (an ASIO driver after a change in its control panel, for one).
+                    if e.kind() == cpal::ErrorKind::StreamInvalidated {
+                        gone.reset.store(true, Ordering::Relaxed);
+                    }
+                    gone.gone.store(true, Ordering::Relaxed);
+                }
+                log::warn!("audio stream error: {e}");
+            })
         },
         None,
     )
@@ -96,9 +103,13 @@ pub(crate) fn open_device(
     want_rate: u32,
     want_ch: u16,
     cfg: &AudioConfig,
-) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, String), String> {
+) -> Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, String, bool), String> {
     use cpal::traits::DeviceTrait;
     let host = devices::host(cfg);
+    let asio = host.id().name() == devices::ASIO;
+    if asio {
+        devices::remember_asio_listing();
+    }
     let device = devices::device(&host, cfg.output.as_deref(), true).ok_or_else(|| "no output device".to_string())?;
     let name = devices::device_name(&device).unwrap_or_else(|| "Audio device".into());
     // Prefer a config at the chosen (else session) rate; else the device default (we resample).
@@ -131,7 +142,7 @@ pub(crate) fn open_device(
             (stream_config, c.sample_format())
         }
     };
-    Ok((device, config, format, name))
+    Ok((device, config, format, name, asio))
 }
 
 /// Pick the output configuration for the first requested rate the device offers (the configured

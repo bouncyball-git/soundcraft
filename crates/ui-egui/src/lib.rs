@@ -257,6 +257,9 @@ pub struct SoundApp {
     /// Punch range to trim the take to (pre/post-roll recordings).
     punch: Option<Range>,
     recorder_failed: bool,
+    /// When the audio device was last reopened because its driver asked for a reset (at most one
+    /// automatic reopen every few seconds, so a driver that keeps asking cannot loop).
+    last_audio_reset: Option<web_time::Instant>,
     /// Input this take lost to a slow disk, as last reported (ms).
     lost_shown: u64,
     /// Where the takes being recorded go, autosaved with the session so a crash can't lose them.

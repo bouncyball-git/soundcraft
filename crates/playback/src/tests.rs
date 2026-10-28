@@ -277,6 +277,11 @@ fn a_lost_or_stalled_device_is_reported_once() {
     let fault = Fault::default();
     fault.gone.store(true, Ordering::Relaxed);
     assert_eq!((fault.trouble(false), fault.trouble(true)), (Some(OutputTrouble::Gone), None));
+    // An invalidated stream on a device that is still there asks for a reopen instead.
+    let fault = Fault::default();
+    fault.reset.store(true, Ordering::Relaxed);
+    fault.gone.store(true, Ordering::Relaxed);
+    assert_eq!((fault.trouble(false), fault.trouble(false)), (Some(OutputTrouble::Reset), None));
 }
 
 #[test]

@@ -19,6 +19,12 @@ fn the_audio_device_choice_is_kept_only_when_it_is_applied() {
     assert_eq!(app.ui.audio, before, "refused while recording: the saved choice stays the open device's");
     app.engine.transport.recording = false;
 
+    // ASIO loads one driver for input and output: two different drivers are refused, and the
+    // input follows the output otherwise.
+    let err = app.run("ui.audio_device", json!({"system": "ASIO", "output": "Driver A", "input": "Driver B"})).unwrap_err();
+    assert!(err.contains("one driver"), "{err}");
+    assert_eq!(app.ui.audio, before, "refused: nothing changes");
+
     // Opens the chosen device, or the default, or a silent clock without one.
     let r = app.run("ui.audio_device", json!({"buffer_size": 256})).unwrap();
     assert_eq!(app.ui.audio.buffer_size, Some(256));

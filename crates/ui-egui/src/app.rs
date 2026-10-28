@@ -35,6 +35,7 @@ impl SoundApp {
             record_start: 0,
             punch: None,
             recorder_failed: false,
+            last_audio_reset: None,
             lost_shown: 0,
             take_plan: None,
             ui: UiState::default(),

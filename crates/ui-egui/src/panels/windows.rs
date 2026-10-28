@@ -463,12 +463,15 @@ fn device_combo(ui: &mut egui::Ui, id: &str, name: &str, value: &mut Option<Stri
 }
 
 /// Optional-number picker with a Device default entry and a unit, labelled for accessibility.
-fn number_combo(ui: &mut egui::Ui, id: &str, name: &str, value: &mut Option<u32>, options: &[u32], unit: &str) {
-    let shown = value.map_or("Device default".to_string(), |v| format!("{v} {unit}"));
+/// `preferred` (the driver's own choice, when it says) is marked in the list.
+fn number_combo(ui: &mut egui::Ui, id: &str, name: &str, value: &mut Option<u32>, options: &[u32], unit: &str, preferred: Option<u32>) {
+    let label = |v: u32| if preferred == Some(v) { format!("{v} {unit} (driver preferred)") } else { format!("{v} {unit}") };
+    let default = preferred.map_or("Device default".to_string(), |p| format!("Device default ({p} {unit})"));
+    let shown = value.map_or(default.clone(), label);
     let combo = craft_ui::ComboBox::from_id_salt(id).width(300.0).selected_text(shown).show_ui(ui, |ui| {
-        ui.selectable_value(value, None, "Device default");
+        ui.selectable_value(value, None, default);
         for v in options {
-            ui.selectable_value(value, Some(*v), format!("{v} {unit}"));
+            ui.selectable_value(value, Some(*v), label(*v));
         }
     });
     combo.response.accessible_name(name);
@@ -484,6 +487,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     let mut draft = ctx.data(|d| d.get_temp::<AudioConfig>(draft_id)).unwrap_or_else(|| app.ui.audio.clone());
     let mut refresh = false;
     let mut apply = false;
+    let mut asio_panel = false;
     let systems = audio_systems(ctx, false);
     win(ctx, &mut open, "Playback Engine", vec2(460.0, 360.0), |ui| {
         let t = Tokens::current();
@@ -506,19 +510,30 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             system.response.labelled_by(system_label.id);
             ui.end_row();
             let sys = chosen_system(&systems, &draft);
-            ui.label("Output device");
-            device_combo(ui, "pe-out", "Output device", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs));
-            ui.end_row();
-            ui.label("Input device");
-            device_combo(ui, "pe-in", "Input device", &mut draft.input, sys.map_or(&[][..], |s| &s.inputs));
-            ui.end_row();
+            if draft.is_asio() {
+                // ASIO lets a process load one driver: it is the input and the output.
+                ui.label("ASIO driver");
+                device_combo(ui, "pe-out", "ASIO driver", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs));
+                draft.input = draft.output.clone();
+                ui.end_row();
+                ui.label("Input device");
+                ui.label(egui::RichText::new("The same driver (ASIO uses one driver for input and output)").color(t.text_dim));
+                ui.end_row();
+            } else {
+                ui.label("Output device");
+                device_combo(ui, "pe-out", "Output device", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs));
+                ui.end_row();
+                ui.label("Input device");
+                device_combo(ui, "pe-in", "Input device", &mut draft.input, sys.map_or(&[][..], |s| &s.inputs));
+                ui.end_row();
+            }
             let out = sys.and_then(|s| chosen_device(&s.outputs, draft.output.as_deref()));
             ui.label("Sample rate");
-            number_combo(ui, "pe-rate", "Sample rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz");
+            number_combo(ui, "pe-rate", "Sample rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz", None);
             ui.end_row();
             ui.label("Buffer size");
             let buffers = out.map(DeviceInfo::buffer_sizes).unwrap_or_else(|| soundcraft_playback::devices::STANDARD_BUFFERS.to_vec());
-            number_combo(ui, "pe-buffer", "Buffer size", &mut draft.buffer_size, &buffers, "samples");
+            number_combo(ui, "pe-buffer", "Buffer size", &mut draft.buffer_size, &buffers, "samples", out.and_then(|d| d.preferred_buffer));
             ui.end_row();
         });
         ui.add_space(4.0);
@@ -566,12 +581,27 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         if crate::widgets::checkbox(ui, &mut dc, "Delay compensation").changed() {
             let _ = app.run("options.delay_compensation", json!({"value": dc}));
         }
-        if ui.button("Reconnect audio device").clicked() {
-            app.reconnect_audio();
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Reconnect audio device").clicked() {
+                app.reconnect_audio();
+            }
+            // The driver's own settings window: it acts on the driver the output has open.
+            let asio = app.player.as_ref().is_some_and(soundcraft_playback::Player::is_asio);
+            let hint = if asio {
+                "Open the ASIO driver's own settings (buffer size, clock, routing). SoundCraft restarts the device when the driver asks."
+            } else {
+                "Apply an ASIO output device first: the settings belong to the driver in use."
+            };
+            if ui.add_enabled(asio, egui::Button::new("ASIO Settings…")).on_hover_text(hint).on_disabled_hover_text(hint).clicked() {
+                asio_panel = true;
+            }
+        });
     });
     if refresh {
         audio_systems(ctx, true);
+    }
+    if asio_panel {
+        app.open_asio_control_panel();
     }
     if apply && let Err(e) = app.apply_audio_config(draft.clone()) {
         app.ui.status = e;
@@ -590,7 +620,8 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
 
 /// `ui.audio_device`: `{list?: bool}` returns the audio systems and their devices;
 /// `{system?, output?, input?, sample_rate?, buffer_size?}` (a `null` value means "default") sets
-/// the choice and reopens the devices. Always returns the choice and the open device.
+/// the choice and reopens the devices. Under ASIO the input is the output's driver (one driver per
+/// process): a different `input` is refused. Always returns the choice and the open device.
 pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::Value;
     let mut changed = false;
@@ -598,6 +629,16 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
     for (key, slot) in [("system", &mut cfg.system), ("output", &mut cfg.output), ("input", &mut cfg.input)] {
         if let Some(v) = p.get(key) {
             *slot = v.as_str().map(str::to_string).filter(|s| !s.is_empty());
+            changed = true;
+        }
+    }
+    if cfg.is_asio() {
+        // ASIO lets a process load one driver, for input and output alike.
+        if p.get("input").is_some_and(|v| !v.is_null()) && cfg.input != cfg.output {
+            return Err("ASIO uses one driver for input and output: set `output` (the input follows it), or the same name for both".into());
+        }
+        if cfg.input != cfg.output {
+            cfg.input = cfg.output.clone();
             changed = true;
         }
     }

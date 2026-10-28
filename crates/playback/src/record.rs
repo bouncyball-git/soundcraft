@@ -128,6 +128,8 @@ pub struct Recorder {
     pub monitor: Arc<InputRing>,
     #[cfg(not(target_os = "freebsd"))]
     _stream: Option<cpal::Stream>,
+    /// Marks the ASIO driver the stream holds; declared after the stream so it drops after it.
+    _asio: Option<crate::devices::AsioHold>,
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: usize,
@@ -176,16 +178,18 @@ where
                 }
             });
         },
+        // Possibly the audio thread, possibly not (an ASIO driver may call it on the UI thread):
+        // marked only while it runs (see `crate::while_audio_thread`).
         move |e: cpal::Error| {
-            // Possibly the audio thread (see `crate::mark_audio_thread`).
-            crate::mark_audio_thread();
-            // cpal 0.18 reports every operation through one error type; a device that went away
-            // or a stream that must be rebuilt (`StreamInvalidated`) stops capture.
-            // `DeviceChanged` (a rerouted default device) and an xrun are not faults.
-            if crate::devices::stream_lost(&e) {
-                let _ = errors.fault.compare_exchange(0, GONE, Ordering::Relaxed, Ordering::Relaxed);
-            }
-            log::warn!("input stream error: {e}");
+            crate::while_audio_thread(|| {
+                // cpal 0.18 reports every operation through one error type; a device that went away
+                // or a stream that must be rebuilt (`StreamInvalidated`) stops capture.
+                // `DeviceChanged` (a rerouted default device) and an xrun are not faults.
+                if crate::devices::stream_lost(&e) {
+                    let _ = errors.fault.compare_exchange(0, GONE, Ordering::Relaxed, Ordering::Relaxed);
+                }
+                log::warn!("input stream error: {e}");
+            })
         },
         None,
     )
@@ -221,7 +225,8 @@ impl Recorder {
     pub fn open_with(audio: &crate::AudioConfig) -> Result<Recorder, String> {
         use cpal::traits::{DeviceTrait, StreamTrait};
         let host = crate::devices::host(audio);
-        let device = crate::devices::device(&host, audio.input.as_deref(), false).ok_or("no audio input device")?;
+        // Under ASIO the input is the output's driver (one driver per process).
+        let device = crate::devices::device(&host, audio.input_device(), false).ok_or("no audio input device")?;
         let name = crate::devices::device_name(&device).unwrap_or_else(|| "Input".into());
         // At the chosen rate when the device offers it, so input and output run together: the
         // best format first, then the most channels.
@@ -277,7 +282,18 @@ impl Recorder {
         };
         stream.play().map_err(|e| e.to_string())?;
         let seen = (0, Instant::now());
-        Ok(Recorder { monitor, shared, _stream: Some(stream), device_name: name, sample_rate: config.sample_rate, channels, writer: None, seen })
+        let asio = crate::devices::AsioHold::on(host.id().name() == crate::devices::ASIO, &device);
+        Ok(Recorder {
+            monitor,
+            shared,
+            _stream: Some(stream),
+            _asio: asio,
+            device_name: name,
+            sample_rate: config.sample_rate,
+            channels,
+            writer: None,
+            seen,
+        })
     }
 
     #[cfg(target_os = "freebsd")]
@@ -523,6 +539,7 @@ mod tests {
             monitor: InputRing::new(1, 48_000),
             #[cfg(not(target_os = "freebsd"))]
             _stream: None,
+            _asio: None,
             device_name: "Mic In".into(),
             sample_rate: 48_000,
             channels: 1,

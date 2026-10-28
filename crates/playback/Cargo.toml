@@ -18,6 +18,8 @@ serde.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal.workspace = true
+# The ASIO driver's buffer sizes and control panel (with the `asio` feature).
+soundcraft-asio-host = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 cpal = { workspace = true, features = ["wasm-bindgen"] }
@@ -26,7 +28,7 @@ cpal = { workspace = true, features = ["wasm-bindgen"] }
 # ASIO on Windows (cpal's ASIO host). Off for this crate; the `soundcraft` app turns it on by
 # default. Building it downloads Steinberg's ASIO SDK (its own licence) and needs LLVM (libclang)
 # for the bindings.
-asio = ["cpal/asio"]
+asio = ["cpal/asio", "dep:soundcraft-asio-host"]
 
 [dev-dependencies]
 serde_json.workspace = true

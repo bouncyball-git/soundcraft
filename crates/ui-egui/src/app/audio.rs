@@ -1,5 +1,8 @@
 use super::*;
 
+/// Shortest time between two automatic reopens of an audio device that asked for a reset.
+const RESET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl SoundApp {
     /// Whether the meters are live: while playing, and while armed or input-monitored tracks are heard.
     pub(crate) fn meters_live(&self) -> bool {
@@ -23,9 +26,11 @@ impl SoundApp {
             // closed here, on the main thread, or they would stay on screen orphaned.
             p.close_editors();
         }
-        // The input reopens on the next record or monitor with the new choice.
+        // The input reopens on the next record or monitor with the new choice. Both close before
+        // the new output opens: ASIO lets a process load one driver, which the old streams hold.
         self.recorder = None;
         self.recorder_failed = false;
+        self.player = None;
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
@@ -56,12 +61,28 @@ impl SoundApp {
         let Some(p) = &self.player else { return };
         let Some(trouble) = p.trouble() else { return };
         let name = p.device_name.clone();
+        if trouble == OutputTrouble::Reset {
+            // The driver asked for its stream to be rebuilt (after a change in its control panel,
+            // for one): reopen it, unless it asked moments ago too.
+            let now = web_time::Instant::now();
+            if self.last_audio_reset.is_none_or(|t| now.duration_since(t) >= RESET_INTERVAL) {
+                self.last_audio_reset = Some(now);
+                let recording = self.engine.transport.recording;
+                self.reconnect_audio();
+                self.ui.status = if recording {
+                    format!("Recording stopped: “{name}” asked to restart (its settings changed). The take is kept up to there.")
+                } else {
+                    format!("“{name}” restarted with its new settings.")
+                };
+                return;
+            }
+        }
         let (cause, then) = match trouble {
             OutputTrouble::Bug => (
                 "the audio engine hit an internal error (see the log)".to_string(),
                 "Use Reconnect audio device in Setup › Playback Engine, or restart SoundCraft.",
             ),
-            OutputTrouble::Gone => {
+            OutputTrouble::Gone | OutputTrouble::Reset => {
                 (format!("“{name}” is unavailable"), "Check the audio device, then use Reconnect audio device in Setup › Playback Engine.")
             }
             OutputTrouble::Stalled => (format!("“{name}” stopped asking for audio"), "Use Reconnect audio device in Setup › Playback Engine."),
@@ -110,6 +131,17 @@ impl SoundApp {
         };
     }
 
+    /// Open the control panel of the ASIO driver the output runs on (Setup › Playback Engine).
+    pub fn open_asio_control_panel(&mut self) {
+        let result = match &self.player {
+            Some(p) => p.asio_control_panel(),
+            None => Err("no audio output is open".into()),
+        };
+        if let Err(e) = result {
+            self.ui.status = format!("ASIO settings: {e}");
+        }
+    }
+
     /// Reopen the audio devices, keeping a take in progress.
     pub fn reconnect_audio(&mut self) {
         if self.is_playing() || self.engine.transport.recording {
@@ -121,6 +153,8 @@ impl SoundApp {
         }
         self.recorder = None;
         self.recorder_failed = false;
+        // Closed before reopening: ASIO lets a process load one driver, which the old stream holds.
+        self.player = None;
         self.player = Some(Player::with_config(self.engine.session_arc(), &self.ui.audio));
     }
 }

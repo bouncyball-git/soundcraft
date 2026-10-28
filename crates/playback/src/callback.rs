@@ -7,6 +7,8 @@ pub(crate) struct Fault {
     failed: AtomicBool,
     /// The device went away or the stream was invalidated: only a reconnect can restore audio.
     pub(crate) gone: AtomicBool,
+    /// The stream was invalidated with the device still there: reopening it restores audio.
+    pub(crate) reset: AtomicBool,
     /// Blocks so far, to tell a device that stopped asking for audio.
     pub(crate) beats: std::sync::atomic::AtomicU64,
     /// The UI has been told.
@@ -19,7 +21,7 @@ impl Fault {
         let trouble = if self.failed.load(Ordering::Relaxed) {
             OutputTrouble::Bug
         } else if self.gone.load(Ordering::Relaxed) {
-            OutputTrouble::Gone
+            if self.reset.load(Ordering::Relaxed) { OutputTrouble::Reset } else { OutputTrouble::Gone }
         } else if stalled {
             OutputTrouble::Stalled
         } else {

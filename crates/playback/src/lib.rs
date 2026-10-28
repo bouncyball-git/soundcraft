@@ -43,7 +43,7 @@ const OLD_SESSIONS: usize = 16;
 
 /// The realtime audio thread marker lives in the mix engine, which carries it into the strips it
 /// renders on worker threads; the cpal callbacks here set it.
-pub use soundcraft_mix::{mark_audio_thread, on_audio_thread};
+pub use soundcraft_mix::{mark_audio_thread, on_audio_thread, while_audio_thread};
 
 mod callback;
 mod stream;
@@ -145,6 +145,9 @@ pub enum OutputTrouble {
     Bug,
     /// The device went away, or the stream was invalidated and must be rebuilt.
     Gone,
+    /// The device asked for its stream to be rebuilt (an ASIO driver after a change in its control
+    /// panel, for one) and is still there: reopening it restores audio.
+    Reset,
     /// The device stopped asking for audio while playing.
     Stalled,
 }
@@ -162,6 +165,8 @@ pub struct Player {
     _stream: Option<cpal::Stream>,
     #[cfg(target_arch = "wasm32")]
     _stream: Option<cpal::Stream>,
+    /// Marks the ASIO driver the stream holds; declared after the stream so it drops after it.
+    asio: Option<devices::AsioHold>,
     pub device_name: String,
     pub device_rate: u32,
     /// Output channels the device was opened with (0 for the silent clock).
@@ -186,6 +191,27 @@ impl Player {
         // Hand the initial session's third-party plugins over.
         p.update_session(session);
         p
+    }
+
+    /// True when the output runs on an ASIO driver.
+    pub fn is_asio(&self) -> bool {
+        self.asio.is_some()
+    }
+
+    /// Open the control panel of the ASIO driver the output runs on. A change there usually ends
+    /// with the driver asking for a reset ([`OutputTrouble::Reset`]); reopen the device then.
+    pub fn asio_control_panel(&self) -> Result<(), String> {
+        if self.asio.is_none() {
+            return Err("the audio output is not using an ASIO driver".into());
+        }
+        #[cfg(feature = "asio")]
+        {
+            soundcraft_asio_host::open_control_panel().map_err(|e| e.to_string())
+        }
+        #[cfg(not(feature = "asio"))]
+        {
+            Err("ASIO is not available in this build".into())
+        }
     }
 
     /// What stopped the audio output, once: a bug in the engine, or the device went away or
@@ -224,7 +250,7 @@ impl Player {
             Mutex::new(side)
         };
         match open_device(want, want_ch, cfg) {
-            Ok((device, config, format, name)) => {
+            Ok((device, config, format, name, asio)) => {
                 // The chosen buffer size first; if the device refuses it, its default.
                 let mut attempts = vec![config];
                 if config.buffer_size != cpal::BufferSize::Default {
@@ -279,6 +305,7 @@ impl Player {
                             tx,
                             side: new_side(grx),
                             _stream: Some(stream),
+                            asio: devices::AsioHold::on(asio, &device),
                             device_name: name,
                             device_rate: rate,
                             device_channels: config.channels,
@@ -356,6 +383,7 @@ impl Player {
             tx,
             side,
             _stream: None,
+            asio: None,
             device_name: "No audio device (silent)".into(),
             device_rate: rate,
             device_channels: 0,
@@ -379,6 +407,7 @@ impl Player {
             tx,
             side,
             _stream: None,
+            asio: None,
             device_name: "No audio device".into(),
             device_rate: session.sample_rate.hz(),
             device_channels: 0,

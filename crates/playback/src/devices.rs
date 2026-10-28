@@ -34,6 +34,19 @@ pub struct AudioConfig {
     pub buffer_size: Option<u32>,
 }
 
+impl AudioConfig {
+    /// True when the chosen audio system is ASIO.
+    pub fn is_asio(&self) -> bool {
+        self.system.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(ASIO))
+    }
+
+    /// The input device to open. ASIO lets a process load one driver, for input and output alike,
+    /// so under ASIO this is the output device whatever `input` says.
+    pub fn input_device(&self) -> Option<&str> {
+        if self.is_asio() { self.output.as_deref() } else { self.input.as_deref() }
+    }
+}
+
 /// One device as the settings window lists it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DeviceInfo {
@@ -46,11 +59,19 @@ pub struct DeviceInfo {
     /// Buffer range the device reports (`None` when it does not say).
     pub buffer_min: Option<u32>,
     pub buffer_max: Option<u32>,
+    /// The sizes the driver itself offers (ASIO), ascending; `None` when it does not say.
+    pub driver_buffers: Option<Vec<u32>>,
+    /// The driver's preferred size (ASIO), also its default.
+    pub preferred_buffer: Option<u32>,
 }
 
 impl DeviceInfo {
-    /// Standard buffer sizes inside the device's range (all of them when the range is unknown).
+    /// The driver's own sizes when it lists them; else the standard sizes inside the device's
+    /// range (all of them when the range is unknown).
     pub fn buffer_sizes(&self) -> Vec<u32> {
+        if let Some(sizes) = self.driver_buffers.as_ref().filter(|s| !s.is_empty()) {
+            return sizes.clone();
+        }
         STANDARD_BUFFERS.iter().copied().filter(|b| self.buffer_min.is_none_or(|m| *b >= m) && self.buffer_max.is_none_or(|m| *b <= m)).collect()
     }
 }
@@ -73,7 +94,7 @@ pub(crate) fn device_name(d: &cpal::Device) -> Option<String> {
 
 /// Describe one cpal device as [`DeviceInfo`], or return `None` when its name or supported configurations cannot be
 /// read. Only formats the playback path can convert are considered.
-fn describe(d: &cpal::Device, default_name: Option<&str>, output: bool) -> Option<DeviceInfo> {
+fn describe(d: &cpal::Device, default_name: Option<&str>, output: bool, asio: bool) -> Option<DeviceInfo> {
     let name = device_name(d)?;
     let ranges: Vec<cpal::SupportedStreamConfigRange> = if output {
         d.supported_output_configs().ok()?.filter(|c| format_rank(c.sample_format()).is_some()).collect()
@@ -89,24 +110,135 @@ fn describe(d: &cpal::Device, default_name: Option<&str>, output: bool) -> Optio
             buffer_max = Some(buffer_max.map_or(*max, |m| m.max(*max)));
         }
     }
-    Some(DeviceInfo { is_default: default_name == Some(name.as_str()), name, max_channels, sample_rates, buffer_min, buffer_max })
+    let driver = if asio { asio_driver_buffers(buffer_min, buffer_max) } else { None };
+    let (driver_buffers, preferred_buffer) = driver.map_or((None, None), |(sizes, preferred)| (Some(sizes), Some(preferred)));
+    Some(DeviceInfo {
+        is_default: default_name == Some(name.as_str()),
+        name,
+        max_channels,
+        sample_rates,
+        buffer_min,
+        buffer_max,
+        driver_buffers,
+        preferred_buffer,
+    })
+}
+
+/// The sizes the loaded ASIO driver offers and its preferred one. cpal keeps a driver loaded while
+/// it lists that device, so this asks the driver being described; its range must match the one
+/// cpal read from it (`min`, `max`), else nothing is trusted.
+#[cfg(feature = "asio")]
+fn asio_driver_buffers(min: Option<u32>, max: Option<u32>) -> Option<(Vec<u32>, u32)> {
+    let sizes = soundcraft_asio_host::loaded_buffer_sizes().ok()?;
+    if Some(sizes.min) != min || Some(sizes.max) != max {
+        log::warn!("ASIO driver buffer range {}..={} does not match the listed device; using the standard sizes", sizes.min, sizes.max);
+        return None;
+    }
+    let choices = sizes.choices();
+    (!choices.is_empty()).then_some((choices, sizes.preferred))
+}
+
+#[cfg(not(feature = "asio"))]
+fn asio_driver_buffers(_min: Option<u32>, _max: Option<u32>) -> Option<(Vec<u32>, u32)> {
+    None
+}
+
+/// cpal's name for the ASIO host.
+pub(crate) const ASIO: &str = "ASIO";
+
+/// ASIO lets a process load one driver. While a stream holds it, cpal can list no other ASIO
+/// device (and stops at the first it cannot load), so the device a stream holds and the last
+/// complete ASIO listing are kept here.
+struct AsioState {
+    /// The device the open ASIO streams use, and how many streams use it.
+    held: Option<(cpal::Device, usize)>,
+    listing: Option<AudioSystem>,
+}
+
+static ASIO_STATE: std::sync::Mutex<AsioState> = std::sync::Mutex::new(AsioState { held: None, listing: None });
+
+fn asio_state() -> std::sync::MutexGuard<'static, AsioState> {
+    ASIO_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Marks an open ASIO stream on a device; dropping it (after the stream) releases the mark.
+pub(crate) struct AsioHold;
+
+impl AsioHold {
+    /// A hold on `device` when it is an ASIO device (`asio`).
+    pub(crate) fn on(asio: bool, device: &cpal::Device) -> Option<AsioHold> {
+        if !asio {
+            return None;
+        }
+        let mut st = asio_state();
+        st.held = match st.held.take() {
+            Some((d, n)) if device_name(&d) == device_name(device) => Some((d, n.saturating_add(1))),
+            _ => Some((device.clone(), 1)),
+        };
+        Some(AsioHold)
+    }
+}
+
+impl Drop for AsioHold {
+    fn drop(&mut self) {
+        let mut st = asio_state();
+        st.held = match st.held.take() {
+            Some((d, n)) if n > 1 => Some((d, n - 1)),
+            _ => None,
+        };
+    }
+}
+
+/// The ASIO device an open stream holds, when `name` is it (or no name is asked for).
+fn held_asio_device(name: Option<&str>) -> Option<cpal::Device> {
+    let st = asio_state();
+    let (d, _) = st.held.as_ref()?;
+    (name.is_none() || device_name(d).as_deref() == name).then(|| d.clone())
 }
 
 /// Every audio system on this machine with its devices. Enumerating can take a moment (some
 /// systems probe each device): call it when the settings window opens, not every frame.
 pub fn audio_systems() -> Vec<AudioSystem> {
     let default_id = cpal::default_host().id();
-    cpal::available_hosts()
-        .into_iter()
-        .filter_map(|id| {
-            let host = cpal::host_from_id(id).ok()?;
-            let def_out = host.default_output_device().as_ref().and_then(device_name);
-            let def_in = host.default_input_device().as_ref().and_then(device_name);
-            let outputs = host.output_devices().map(|ds| ds.filter_map(|d| describe(&d, def_out.as_deref(), true)).collect()).unwrap_or_default();
-            let inputs = host.input_devices().map(|ds| ds.filter_map(|d| describe(&d, def_in.as_deref(), false)).collect()).unwrap_or_default();
-            Some(AudioSystem { name: id.name().to_string(), is_default: id == default_id, outputs, inputs })
-        })
-        .collect()
+    cpal::available_hosts().into_iter().filter_map(|id| list_system(id, default_id)).collect()
+}
+
+/// One audio system and its devices. While an ASIO stream holds a driver, ASIO is the last
+/// complete listing (cpal could list no other driver); a listing made with none held is kept.
+fn list_system(id: cpal::HostId, default_id: cpal::HostId) -> Option<AudioSystem> {
+    let asio = id.name() == ASIO;
+    // One lock: `asio_state()` must not be taken twice in one expression.
+    let kept = if asio {
+        let st = asio_state();
+        st.held.as_ref().and(st.listing.clone())
+    } else {
+        None
+    };
+    if let Some(listing) = kept {
+        return Some(AudioSystem { is_default: id == default_id, ..listing });
+    }
+    let host = cpal::host_from_id(id).ok()?;
+    let def_out = host.default_output_device().as_ref().and_then(device_name);
+    let def_in = host.default_input_device().as_ref().and_then(device_name);
+    let outputs = host.output_devices().map(|ds| ds.filter_map(|d| describe(&d, def_out.as_deref(), true, asio)).collect()).unwrap_or_default();
+    let inputs = host.input_devices().map(|ds| ds.filter_map(|d| describe(&d, def_in.as_deref(), false, asio)).collect()).unwrap_or_default();
+    let system = AudioSystem { name: id.name().to_string(), is_default: id == default_id, outputs, inputs };
+    if asio && asio_state().held.is_none() {
+        asio_state().listing = Some(system.clone());
+    }
+    Some(system)
+}
+
+/// List the ASIO devices once before the first ASIO stream opens (none is held yet), so the
+/// settings window can show them, and their drivers' buffer sizes, while that stream runs.
+pub(crate) fn remember_asio_listing() {
+    let needed = {
+        let st = asio_state();
+        st.held.is_none() && st.listing.is_none()
+    };
+    if needed && let Some(id) = cpal::available_hosts().into_iter().find(|id| id.name() == ASIO) {
+        let _ = list_system(id, cpal::default_host().id());
+    }
 }
 
 /// True when a cpal error means the stream is dead and only a rebuild can restore audio. cpal 0.18
@@ -170,9 +302,16 @@ pub(crate) fn device(host: &cpal::Host, name: Option<&str>, output: bool) -> Opt
         if found.is_some() {
             return found;
         }
+        // An ASIO driver an open stream holds is the only one cpal can open now.
+        if host.id().name() == ASIO
+            && let Some(d) = held_asio_device(Some(want))
+        {
+            return Some(d);
+        }
         log::warn!("audio device `{want}` is not available; using the default");
     }
-    if output { host.default_output_device() } else { host.default_input_device() }
+    let default = if output { host.default_output_device() } else { host.default_input_device() };
+    default.or_else(|| if host.id().name() == ASIO { held_asio_device(None) } else { None })
 }
 
 /// The buffer to request: the chosen size when the device's range allows it, else the default.
@@ -318,10 +457,29 @@ mod tests {
             sample_rates: vec![48_000],
             buffer_min: Some(64),
             buffer_max: Some(1024),
+            driver_buffers: None,
+            preferred_buffer: None,
         };
         assert_eq!(d.buffer_sizes(), [64, 128, 256, 512, 1024]);
-        let open = DeviceInfo { buffer_min: None, buffer_max: None, ..d };
+        let open = DeviceInfo { buffer_min: None, buffer_max: None, ..d.clone() };
         assert_eq!(open.buffer_sizes().len(), STANDARD_BUFFERS.len());
+        // A driver's own list wins; an empty one falls back to the standard sizes.
+        let asio = DeviceInfo { driver_buffers: Some(vec![48, 96, 144]), preferred_buffer: Some(96), ..d.clone() };
+        assert_eq!(asio.buffer_sizes(), [48, 96, 144]);
+        let empty = DeviceInfo { driver_buffers: Some(Vec::new()), ..d };
+        assert_eq!(empty.buffer_sizes(), [64, 128, 256, 512, 1024]);
+    }
+
+    #[test]
+    fn asio_opens_its_input_on_the_output_driver() {
+        let wasapi = AudioConfig { system: Some("WASAPI".into()), output: Some("Speakers".into()), input: Some("Mic".into()), ..Default::default() };
+        assert!(!wasapi.is_asio());
+        assert_eq!(wasapi.input_device(), Some("Mic"));
+        let asio = AudioConfig { system: Some("asio".into()), output: Some("Driver A".into()), input: Some("Driver B".into()), ..Default::default() };
+        assert!(asio.is_asio());
+        assert_eq!(asio.input_device(), Some("Driver A"), "one driver for input and output");
+        let default = AudioConfig { system: Some("ASIO".into()), ..Default::default() };
+        assert_eq!(default.input_device(), None);
     }
 
     #[test]

@@ -4302,6 +4302,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "soundcraft-asio-host"
+version = "0.13.1"
+dependencies = [
+ "asio-sys",
+]
+
+[[package]]
 name = "soundcraft-au-host"
 version = "0.13.1"
 dependencies = [
@@ -4447,6 +4454,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "soundcraft-asio-host",
  "soundcraft-audio-io",
  "soundcraft-dsp",
  "soundcraft-mix",
