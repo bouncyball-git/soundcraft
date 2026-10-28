@@ -162,6 +162,8 @@ fn asio_driver_buffers(_min: Option<u32>, _max: Option<u32>) -> Option<(Vec<u32>
 
 /// cpal's name for the ASIO host.
 pub(crate) const ASIO: &str = "ASIO";
+/// The audio system name ASIO is listed under.
+pub const ASIO_SYSTEM: &str = ASIO;
 
 /// ASIO lets a process load one driver. While a stream holds it, cpal can list no other ASIO
 /// device (and stops at the first it cannot load), so the device a stream holds and the last
