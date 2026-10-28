@@ -547,23 +547,29 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             }
         });
         ui.separator();
-        // What runs now, in one line: channels, rate, buffer and the driver's latency.
+        // What runs now: the device's channels, its rate and buffer, and the driver's latency.
         match app.player.as_ref().filter(|p| !p.silent) {
             Some(p) => {
-                // Input channels: the open input's, else (ASIO, one driver) the driver's own.
-                let inputs = app.recorder.as_ref().map(|r| r.channels).or_else(|| {
-                    let listed = systems.iter().find(|s| p.is_asio() && s.name.eq_ignore_ascii_case(soundcraft_playback::devices::ASIO_SYSTEM));
-                    listed.and_then(|s| s.inputs.iter().find(|d| d.name == p.device_name)).map(|d| usize::from(d.max_channels))
+                // Channel counts are the devices' own (as listed), not what the mix uses of them.
+                let sys = chosen_system(&systems, &app.ui.audio);
+                let listed = |devices: &[DeviceInfo], name: Option<&str>| chosen_device(devices, name).map(|d| d.max_channels);
+                let outputs = sys.and_then(|s| listed(&s.outputs, Some(&p.device_name))).unwrap_or(p.device_channels).max(p.device_channels);
+                let inputs = if p.is_asio() {
+                    // ASIO: the one driver is the input too.
+                    sys.and_then(|s| listed(&s.inputs, Some(&p.device_name))).map(usize::from)
+                } else {
+                    sys.and_then(|s| listed(&s.inputs, app.ui.audio.input.as_deref())).map(usize::from).or(app.recorder.as_ref().map(|r| r.channels))
+                };
+                let session_rate = app.engine.session().sample_rate.hz();
+                let rows = engine_rows(outputs, p.device_channels, inputs, p.device_rate, p.device_buffer, p.device_latency, session_rate);
+                let grid = egui::Grid::new("pe-running").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
+                    for (label, value) in rows {
+                        ui.label(egui::RichText::new(label).color(t.text_dim));
+                        ui.label(value);
+                        ui.end_row();
+                    }
                 });
-                let line = engine_summary(
-                    p.device_channels,
-                    inputs,
-                    p.device_rate,
-                    p.device_buffer,
-                    p.device_latency,
-                    app.engine.session().sample_rate.hz(),
-                );
-                ui.label(line).on_hover_text(format!("{} · the mix runs in 512-sample blocks", p.device_name));
+                grid.response.on_hover_text(format!("{} (the mix runs in 512-sample blocks)", p.device_name));
             }
             None => {
                 ui.label(egui::RichText::new("No audio device: a silent clock keeps time").color(t.text_dim));
@@ -610,32 +616,39 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     app.ui.show_playback_engine = open;
 }
 
-/// The running device in one line: `2 in / 2 out · 48 kHz · 48 samples · latency 7.5 ms in / 9.6
-/// ms out`. Unknown parts are left out (input channels before the input opens, latency a driver
-/// does not report); a session rate the device does not run at is noted.
-fn engine_summary(
+/// The running device, as labelled rows: its own channels (noting the outputs the mix uses when
+/// fewer), its rate and buffer (noting a session rate it does not run at), and the latency its
+/// driver reports. Input channels and latency are left out when unknown.
+fn engine_rows(
     outputs: u16,
+    outputs_used: u16,
     inputs: Option<usize>,
     rate: u32,
     buffer: Option<u32>,
     latency: Option<soundcraft_playback::DeviceLatency>,
     session_rate: u32,
-) -> String {
+) -> Vec<(&'static str, String)> {
     let khz = |hz: u32| if hz.is_multiple_of(1000) { format!("{} kHz", hz / 1000) } else { format!("{:.1} kHz", f64::from(hz) / 1000.0) };
     let ms = |frames: u32| f64::from(frames) * 1000.0 / f64::from(rate.max(1));
-    let mut parts = vec![match inputs {
-        Some(i) => format!("{i} in / {outputs} out"),
+    let mut channels = match inputs {
+        Some(i) => format!("{i} in, {outputs} out"),
         None => format!("{outputs} out"),
-    }];
-    parts.push(khz(rate));
-    parts.push(buffer.map_or("device buffer".to_string(), |b| format!("{b} samples")));
-    if let Some(l) = latency {
-        parts.push(format!("latency {:.1} ms in / {:.1} ms out", ms(l.input), ms(l.output)));
+    };
+    if outputs_used > 0 && outputs_used < outputs {
+        channels.push_str(&format!(" (outputs 1–{outputs_used} in use)"));
     }
+    let mut format = match buffer {
+        Some(b) => format!("{}, {b}-sample buffer", khz(rate)),
+        None => format!("{}, the device's default buffer", khz(rate)),
+    };
     if session_rate != rate {
-        parts.push(format!("session {}, resampled", khz(session_rate)));
+        format.push_str(&format!(" (session {}, resampled)", khz(session_rate)));
     }
-    parts.join(" · ")
+    let mut rows = vec![("Channels", channels), ("Format", format)];
+    if let Some(l) = latency {
+        rows.push(("Latency", format!("{:.1} ms in, {:.1} ms out", ms(l.input), ms(l.output))));
+    }
+    rows
 }
 
 /// `ui.audio_device`: `{list?: bool}` returns the audio systems and their devices;
@@ -849,19 +862,27 @@ mod audio_health_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::engine_summary;
+    use super::engine_rows;
     use soundcraft_playback::DeviceLatency;
 
     #[test]
-    fn the_engine_summary_is_one_short_line() {
-        let asio = Some(DeviceLatency { input: 360, output: 461 });
-        assert_eq!(engine_summary(2, Some(2), 48_000, Some(48), asio, 48_000), "2 in / 2 out · 48 kHz · 48 samples · latency 7.5 ms in / 9.6 ms out");
-        // Input not open, no latency report, the driver's buffer, a resampled session.
-        assert_eq!(engine_summary(2, None, 44_100, None, None, 48_000), "2 out · 44.1 kHz · device buffer · session 48 kHz, resampled");
-        // A zero rate cannot divide by zero.
+    fn the_running_device_reads_as_labelled_rows() {
+        let latency = Some(DeviceLatency { input: 360, output: 461 });
+        // A 4-in/4-out ASIO driver the stereo mix plays on outputs 1-2.
         assert_eq!(
-            engine_summary(2, None, 0, Some(64), Some(DeviceLatency { input: 1, output: 1 }), 0),
-            "2 out · 0 kHz · 64 samples · latency 1000.0 ms in / 1000.0 ms out"
+            engine_rows(4, 2, Some(4), 48_000, Some(48), latency, 48_000),
+            vec![
+                ("Channels", "4 in, 4 out (outputs 1–2 in use)".to_string()),
+                ("Format", "48 kHz, 48-sample buffer".to_string()),
+                ("Latency", "7.5 ms in, 9.6 ms out".to_string()),
+            ]
         );
+        // Input unknown, every output used, the default buffer, a resampled session, no latency.
+        assert_eq!(
+            engine_rows(2, 2, None, 44_100, None, None, 48_000),
+            vec![("Channels", "2 out".to_string()), ("Format", "44.1 kHz, the device's default buffer (session 48 kHz, resampled)".to_string()),]
+        );
+        // A zero rate cannot divide by zero.
+        assert_eq!(engine_rows(2, 2, None, 0, Some(64), Some(DeviceLatency { input: 1, output: 1 }), 0)[2].1, "1000.0 ms in, 1000.0 ms out");
     }
 }
