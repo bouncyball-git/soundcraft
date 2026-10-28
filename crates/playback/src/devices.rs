@@ -139,8 +139,15 @@ fn describe(d: &cpal::Device, default_name: Option<&str>, output: bool, asio: bo
             buffer_max = Some(buffer_max.map_or(*max, |m| m.max(*max)));
         }
     }
-    let driver = if asio { asio_driver_buffers(buffer_min, buffer_max) } else { None };
-    let (driver_buffers, preferred_buffer) = driver.map_or((None, None), |(sizes, preferred)| (Some(sizes), Some(preferred)));
+    let (mut driver_buffers, mut preferred_buffer) = (None, None);
+    // The open driver's own answer, at the rate it runs at now: cpal read its range once, when it
+    // loaded the driver, and a driver's sizes may follow its rate (44..=8192 in steps of 44 at
+    // 44.1 kHz, 48..=8192 in steps of 48 at 48 kHz).
+    if asio && let Some((min, max, sizes, preferred)) = asio_driver_buffers() {
+        (buffer_min, buffer_max) = (Some(min), Some(max));
+        driver_buffers = (!sizes.is_empty()).then_some(sizes);
+        preferred_buffer = Some(preferred);
+    }
     Some(DeviceInfo {
         is_default: default_name == Some(name.as_str()),
         name,
@@ -153,18 +160,22 @@ fn describe(d: &cpal::Device, default_name: Option<&str>, output: bool, asio: bo
     })
 }
 
-/// The sizes the loaded ASIO driver offers and its preferred one. cpal keeps a driver loaded while
-/// it lists that device, so this asks the driver being described; its range must match the one
-/// cpal read from it (`min`, `max`), else nothing is trusted.
+/// The loaded ASIO driver's buffer report: `(min, max, sizes to offer, preferred)`. The loaded
+/// driver is the one an open stream holds (the only caller describes the device it opened).
 #[cfg(feature = "asio")]
-fn asio_driver_buffers(min: Option<u32>, max: Option<u32>) -> Option<(Vec<u32>, u32)> {
-    let sizes = soundcraft_asio_host::loaded_buffer_sizes().ok()?;
-    if Some(sizes.min) != min || Some(sizes.max) != max {
-        log::warn!("ASIO driver buffer range {}..={} does not match the listed device; using the standard sizes", sizes.min, sizes.max);
-        return None;
+fn asio_driver_buffers() -> Option<(u32, u32, Vec<u32>, u32)> {
+    match soundcraft_asio_host::loaded_buffer_sizes() {
+        Ok(s) => Some((s.min, s.max, s.choices(), s.preferred)),
+        Err(e) => {
+            log::warn!("ASIO buffer sizes: {e}");
+            None
+        }
     }
-    let choices = sizes.choices();
-    (!choices.is_empty()).then_some((choices, sizes.preferred))
+}
+
+#[cfg(not(feature = "asio"))]
+fn asio_driver_buffers() -> Option<(u32, u32, Vec<u32>, u32)> {
+    None
 }
 
 /// The loaded ASIO driver's input and output latency (an open ASIO stream holds the driver).
@@ -181,11 +192,6 @@ pub(crate) fn asio_latency() -> Option<crate::DeviceLatency> {
 
 #[cfg(not(feature = "asio"))]
 pub(crate) fn asio_latency() -> Option<crate::DeviceLatency> {
-    None
-}
-
-#[cfg(not(feature = "asio"))]
-fn asio_driver_buffers(_min: Option<u32>, _max: Option<u32>) -> Option<(Vec<u32>, u32)> {
     None
 }
 
