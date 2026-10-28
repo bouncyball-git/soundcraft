@@ -27,6 +27,7 @@ People trust SoundCraft with their recordings; a crash loses takes. **This outra
 - The one named exception is `soundcraft-clap-host` (`crates/clap-host`), the isolated unsafe helper crate for CLAP plugin FFI: `unsafe_code = "deny"` crate-wide, allowed only in `src/ffi.rs` with a `// SAFETY:` comment on every block, safe `Result` API.
 - The same exception, same rules, for `soundcraft-vst3-host` (`crates/vst3-host`), the isolated unsafe helper crate for VST3 plugin FFI (COM vtables via the `vst3` bindings, module loading, host-side COM objects).
 - And for `soundcraft-au-host` (`crates/au-host`), the isolated unsafe helper crate for Audio Unit FFI (hand-written AudioToolbox/CoreFoundation declarations, macOS only; a safe stub elsewhere).
+- And for `soundcraft-asio-host` (`crates/asio-host`), the isolated unsafe helper crate for the two ASIO SDK calls cpal does not expose (the loaded driver's buffer sizes and control panel; Windows MSVC only, a safe stub elsewhere).
 - Errors are `Result<T, E>` + `?`. An unfinished feature returns an "unsupported" error.
 - Input-derived numbers are hostile (files, commands, MCP/control params): `get()` not `[i]`, checked/saturating arithmetic, no NaN casts, cap allocations.
 - The audio callback never blocks, allocates in steady state, or panics.
@@ -39,7 +40,7 @@ People trust SoundCraft with their recordings; a crash loses takes. **This outra
 | Layer | Crate | Role |
 |---|---|---|
 | L0 | `soundcraft-time`, `soundcraft-audio-io`, `soundcraft-midi`, `soundcraft-video` | Timebases/tempo/grid; audio file formats + peaks; Standard MIDI Files + MIDI ops; MP4/MOV demux + video decoding |
-| L1 | `soundcraft-dsp`, `soundcraft-clap-host`, `soundcraft-vst3-host`, `soundcraft-au-host` | Plugins (EQ, dynamics, reverb, delay, modulation, harmonic, pitch, utility, instruments), offline processing, meters, FFT; third-party CLAP/VST3/AU hosting (the isolated unsafe FFI crates) |
+| L1 | `soundcraft-dsp`, `soundcraft-clap-host`, `soundcraft-vst3-host`, `soundcraft-au-host`, `soundcraft-asio-host` | Plugins (EQ, dynamics, reverb, delay, modulation, harmonic, pitch, utility, instruments), offline processing, meters, FFT; third-party CLAP/VST3/AU hosting and ASIO driver calls (the isolated unsafe FFI crates) |
 | L2 | `soundcraft-model` | The session document (tracks, playlists, clips, mixer, routing, automation, markers, groups) |
 | L3 | `soundcraft-mix` | Mix engine shared by realtime playback and offline bounce |
 | L4 | `soundcraft-engine`, `soundcraft-playback` | Command registry, undo, editing, import/export/bounce, parity catalog; audio device I/O (cpal) |
