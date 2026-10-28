@@ -1,4 +1,4 @@
-use super::*;
+use super::{MeterDisplay, OutputTrouble, Player, Samples, SoundApp, Trouble};
 
 /// Shortest time between two automatic reopens of an audio device that asked for a reset.
 const RESET_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);

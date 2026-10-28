@@ -19,7 +19,9 @@ asio-sys = "0.4.0"
 unsafe_code = "deny"
 
 [lints.clippy]
+cognitive_complexity = "deny"
+wildcard_imports = "deny"
 dbg_macro = "warn"
 todo = "warn"
-too_many_arguments = "allow"
+too_many_arguments = "deny"
 type_complexity = "allow"
