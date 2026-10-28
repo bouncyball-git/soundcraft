@@ -426,13 +426,28 @@ pub fn recall_configuration(app: &mut SoundApp, saved: &Value) -> Result<(), Str
 /// The audio systems as last enumerated (enumerating probes devices: done when the window opens
 /// and on Refresh, not every frame).
 fn audio_systems(ctx: &egui::Context, refresh: bool) -> Arc<Vec<AudioSystem>> {
-    let id = egui::Id::unique("audio_systems");
-    if !refresh && let Some(s) = ctx.data(|d| d.get_temp::<Arc<Vec<AudioSystem>>>(id)) {
+    let version = soundcraft_playback::devices::listing_version();
+    // Kept until a refresh, or until an open driver's details change (its listing version).
+    if !refresh
+        && let Some((seen, s)) = ctx.data(|d| d.get_temp::<(u64, Arc<Vec<AudioSystem>>)>(audio_systems_id()))
+        && seen == version
+    {
         return s;
     }
     let s = Arc::new(soundcraft_playback::devices::audio_systems());
-    ctx.data_mut(|d| d.insert_temp(id, Arc::clone(&s)));
+    keep_audio_systems(ctx, Arc::clone(&s));
     s
+}
+
+/// Where the settings window keeps its device listing.
+fn audio_systems_id() -> egui::Id {
+    egui::Id::unique("audio_systems")
+}
+
+/// Keep `systems` as the settings window's listing, at the current listing version.
+fn keep_audio_systems(ctx: &egui::Context, systems: Arc<Vec<AudioSystem>>) {
+    let version = soundcraft_playback::devices::listing_version();
+    ctx.data_mut(|d| d.insert_temp(audio_systems_id(), (version, systems)));
 }
 
 /// The system a config means (its own, else the default one) in an enumeration.
@@ -529,8 +544,21 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
             number_combo(ui, "pe-rate", "Sample rate", &mut draft.sample_rate, out.map_or(&[][..], |d| &d.sample_rates), "Hz", None);
             ui.end_row();
             ui.label("Buffer size");
-            let buffers = out.map(DeviceInfo::buffer_sizes).unwrap_or_else(|| soundcraft_playback::devices::STANDARD_BUFFERS.to_vec());
-            number_combo(ui, "pe-buffer", "Buffer size", &mut draft.buffer_size, &buffers, "samples", out.and_then(|d| d.preferred_buffer));
+            match out.and_then(DeviceInfo::fixed_buffer) {
+                // The driver takes one size, set in its own settings (RME): nothing to choose here.
+                Some(size) => {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{size} samples"));
+                        ui.label(egui::RichText::new("set in the driver (ASIO Settings…)").color(t.text_dim));
+                    })
+                    .response
+                    .on_hover_text("This driver takes one buffer size, chosen in its own settings. Change it there with ASIO Settings…; SoundCraft follows when the driver restarts.");
+                }
+                None => {
+                    let buffers = out.map(DeviceInfo::buffer_sizes).unwrap_or_else(|| soundcraft_playback::devices::STANDARD_BUFFERS.to_vec());
+                    number_combo(ui, "pe-buffer", "Buffer size", &mut draft.buffer_size, &buffers, "samples", out.and_then(|d| d.preferred_buffer));
+                }
+            }
             ui.end_row();
         });
         ui.add_space(4.0);
@@ -562,7 +590,10 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
                     sys.and_then(|s| listed(&s.inputs, app.ui.audio.input.as_deref())).map(usize::from).or(app.recorder.as_ref().map(|r| r.channels))
                 };
                 let session_rate = app.engine.session().sample_rate.hz();
-                let rows = engine_rows(outputs, p.device_channels, inputs, p.device_rate, p.device_buffer, p.device_latency, session_rate);
+                // No size asked for: an ASIO driver runs at its preferred one, which it reports.
+                let preferred = || sys.and_then(|s| chosen_device(&s.outputs, Some(&p.device_name))).and_then(|d| d.preferred_buffer);
+                let buffer = p.device_buffer.or_else(|| if p.is_asio() { preferred() } else { None });
+                let rows = engine_rows(outputs, p.device_channels, inputs, p.device_rate, buffer, p.device_latency, session_rate);
                 let grid = egui::Grid::new("pe-running").num_columns(2).spacing(vec2(12.0, 4.0)).show(ui, |ui| {
                     for (label, value) in rows {
                         ui.label(egui::RichText::new(label).color(t.text_dim));
@@ -599,7 +630,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
     if refresh {
         match app.rescan_audio_devices() {
             Ok(systems) => {
-                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("audio_systems"), Arc::new(systems)));
+                keep_audio_systems(ctx, Arc::new(systems));
             }
             Err(e) => {
                 app.ui.status = e;
@@ -618,7 +649,7 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         // Closing discards unapplied edits and the device list (re-read on the next open).
         ctx.data_mut(|d| {
             d.remove_temp::<AudioConfig>(draft_id);
-            d.remove_temp::<Arc<Vec<AudioSystem>>>(egui::Id::unique("audio_systems"));
+            d.remove_temp::<(u64, Arc<Vec<AudioSystem>>)>(audio_systems_id());
         });
     }
     app.ui.show_playback_engine = open;

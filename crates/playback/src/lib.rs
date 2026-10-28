@@ -306,6 +306,10 @@ impl Player {
                             "audio device: {name} @ {rate} Hz, {channels} ch, {format}, buffer {}",
                             buffer.map_or("default".to_string(), |n| n.to_string())
                         );
+                        if asio {
+                            // A driver whose size is set in its own settings may report a new one.
+                            devices::update_held_asio_buffers(&name);
+                        }
                         Player {
                             shared,
                             fault,

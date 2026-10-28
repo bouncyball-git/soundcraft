@@ -74,6 +74,15 @@ impl DeviceInfo {
         }
         STANDARD_BUFFERS.iter().copied().filter(|b| self.buffer_min.is_none_or(|m| *b >= m) && self.buffer_max.is_none_or(|m| *b <= m)).collect()
     }
+
+    /// The one buffer size a driver takes, when it lists exactly one: its size is set in its own
+    /// settings (an RME ASIO driver reports only its current size), not chosen by the host.
+    pub fn fixed_buffer(&self) -> Option<u32> {
+        match self.driver_buffers.as_deref() {
+            Some([only]) => Some(*only),
+            _ => None,
+        }
+    }
 }
 
 /// An audio system and its devices.
@@ -207,6 +216,43 @@ impl Drop for AsioHold {
         };
     }
 }
+
+/// Bumped whenever the kept ASIO listing changes after it was taken (see
+/// [`update_held_asio_buffers`]), so a window holding a copy knows to read it again.
+static LISTING_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The version of the device listing; it changes when an open driver's details change.
+pub fn listing_version() -> u64 {
+    LISTING_VERSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Re-read the buffer sizes of the ASIO driver that just opened as `name` into the kept ASIO
+/// listing. A driver whose size is set in its own settings (RME) reports a new one after a change
+/// there; without this the listing would show the old size until the devices are refreshed.
+#[cfg(feature = "asio")]
+pub(crate) fn update_held_asio_buffers(name: &str) {
+    let Ok(sizes) = soundcraft_asio_host::loaded_buffer_sizes() else { return };
+    let choices = sizes.choices();
+    let now = (Some(sizes.min), Some(sizes.max), (!choices.is_empty()).then_some(choices), Some(sizes.preferred));
+    let changed = {
+        let mut st = asio_state();
+        let Some(listing) = st.listing.as_mut() else { return };
+        let mut changed = false;
+        for d in listing.outputs.iter_mut().chain(listing.inputs.iter_mut()).filter(|d| d.name == name) {
+            if (d.buffer_min, d.buffer_max, d.driver_buffers.clone(), d.preferred_buffer) != now {
+                (d.buffer_min, d.buffer_max, d.driver_buffers, d.preferred_buffer) = now.clone();
+                changed = true;
+            }
+        }
+        changed
+    };
+    if changed {
+        LISTING_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "asio"))]
+pub(crate) fn update_held_asio_buffers(_name: &str) {}
 
 /// The ASIO device an open stream holds, when `name` is it (or no name is asked for).
 fn held_asio_device(name: Option<&str>) -> Option<cpal::Device> {
@@ -485,8 +531,13 @@ mod tests {
         // A driver's own list wins; an empty one falls back to the standard sizes.
         let asio = DeviceInfo { driver_buffers: Some(vec![48, 96, 144]), preferred_buffer: Some(96), ..d.clone() };
         assert_eq!(asio.buffer_sizes(), [48, 96, 144]);
-        let empty = DeviceInfo { driver_buffers: Some(Vec::new()), ..d };
+        let empty = DeviceInfo { driver_buffers: Some(Vec::new()), ..d.clone() };
         assert_eq!(empty.buffer_sizes(), [64, 128, 256, 512, 1024]);
+        // A driver that lists one size (set in its own settings) has a fixed buffer; a range does not.
+        assert_eq!(DeviceInfo { driver_buffers: Some(vec![64]), ..d.clone() }.fixed_buffer(), Some(64));
+        assert_eq!(asio.fixed_buffer(), None);
+        assert_eq!(d.fixed_buffer(), None, "no driver list: not fixed");
+        assert_eq!(empty.fixed_buffer(), None);
     }
 
     #[test]
