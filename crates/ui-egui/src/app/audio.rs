@@ -20,21 +20,52 @@ impl SoundApp {
         }
         self.ui.audio = cfg;
         let at = self.position();
+        self.close_audio();
+        self.open_audio(at);
+        Ok(())
+    }
+
+    /// Re-list the audio systems and devices (Setup › Playback Engine › Refresh devices). An
+    /// ASIO driver in use blocks probing any other (ASIO lets a process load one driver), so then
+    /// the devices close for the listing and reopen after it, at the same position; that is
+    /// refused while recording. Without ASIO in use, nothing closes.
+    pub fn rescan_audio_devices(&mut self) -> Result<Vec<soundcraft_playback::devices::AudioSystem>, String> {
+        if !self.player.as_ref().is_some_and(Player::is_asio) {
+            return Ok(soundcraft_playback::devices::audio_systems());
+        }
+        if self.engine.transport.recording {
+            return Err("stop recording before refreshing the devices: the ASIO driver in use closes while they are listed".into());
+        }
+        let at = self.position();
+        if self.is_playing() {
+            self.stop_play();
+        }
+        self.close_audio();
+        let systems = soundcraft_playback::devices::audio_systems();
+        self.open_audio(at);
+        Ok(systems)
+    }
+
+    /// Close the output and input devices. The player's plugin instances go away with it; their
+    /// editor windows must be closed here, on the main thread, or they would stay on screen
+    /// orphaned. Both streams close before any new one opens: ASIO lets a process load one
+    /// driver, which they hold.
+    fn close_audio(&mut self) {
         if let Some(p) = &self.player {
             p.stop();
-            // The old player's plugin instances go away with it; their editor windows must be
-            // closed here, on the main thread, or they would stay on screen orphaned.
             p.close_editors();
         }
-        // The input reopens on the next record or monitor with the new choice. Both close before
-        // the new output opens: ASIO lets a process load one driver, which the old streams hold.
+        // The input reopens on the next record or monitor.
         self.recorder = None;
         self.recorder_failed = false;
         self.player = None;
+    }
+
+    /// Open the output device `ui.audio` chooses, at `at`.
+    fn open_audio(&mut self, at: Samples) {
         let player = soundcraft_playback::Player::with_config(self.engine.session_arc(), &self.ui.audio);
         player.locate(at);
         self.player = Some(player);
-        Ok(())
     }
 
     /// Open the input device once (for recording and input monitoring) and feed the player.

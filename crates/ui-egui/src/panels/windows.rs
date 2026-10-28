@@ -535,7 +535,8 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("Refresh devices").clicked() {
+            let hint = "List the audio devices again. With an ASIO driver in use, audio stops for a moment while every driver is checked.";
+            if ui.button("Refresh devices").on_hover_text(hint).clicked() {
                 refresh = true;
             }
             let changed = draft != app.ui.audio;
@@ -596,7 +597,14 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
         });
     });
     if refresh {
-        audio_systems(ctx, true);
+        match app.rescan_audio_devices() {
+            Ok(systems) => {
+                ctx.data_mut(|d| d.insert_temp(egui::Id::unique("audio_systems"), Arc::new(systems)));
+            }
+            Err(e) => {
+                app.ui.status = e;
+            }
+        }
     }
     if asio_panel {
         app.open_asio_control_panel();
@@ -654,7 +662,9 @@ fn engine_rows(
 /// `ui.audio_device`: `{list?: bool}` returns the audio systems and their devices;
 /// `{system?, output?, input?, sample_rate?, buffer_size?}` (a `null` value means "default") sets
 /// the choice and reopens the devices. Under ASIO the input is the output's driver (one driver per
-/// process): a different `input` is refused. Always returns the choice and the open device.
+/// process): a different `input` is refused. `{refresh: true}` lists them again like Refresh
+/// devices (an ASIO driver in use closes for it and reopens; refused while recording). Always
+/// returns the choice and the open device.
 pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::Value;
     let mut changed = false;
@@ -691,7 +701,13 @@ pub fn audio_device_command(app: &mut SoundApp, p: &serde_json::Value) -> Result
         json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})
     });
     let mut out = json!({"config": app.ui.audio, "device": device});
-    if p.get("list").and_then(Value::as_bool).unwrap_or(false) {
+    if p.get("refresh").and_then(Value::as_bool).unwrap_or(false) {
+        // Like Refresh devices: an ASIO driver in use closes while every device is probed.
+        out["systems"] = json!(app.rescan_audio_devices()?);
+        out["device"] = json!(app.player.as_ref().map(|pl| {
+            json!({"name": pl.device_name, "sample_rate": pl.device_rate, "channels": pl.device_channels, "buffer_size": pl.device_buffer, "silent": pl.silent})
+        }));
+    } else if p.get("list").and_then(Value::as_bool).unwrap_or(false) {
         out["systems"] = json!(soundcraft_playback::devices::audio_systems());
     }
     Ok(out)
