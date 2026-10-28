@@ -138,6 +138,13 @@ struct Shared {
     meters: Mutex<MeterSnapshot>,
 }
 
+/// A device's own latency in frames at its rate, as its driver reports it (ASIO).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceLatency {
+    pub input: u32,
+    pub output: u32,
+}
+
 /// What stopped the audio output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputTrouble {
@@ -175,6 +182,8 @@ pub struct Player {
     pub device_buffer: Option<u32>,
     /// True when no audio device could be opened (silent clock).
     pub silent: bool,
+    /// The driver's input and output latency when it reports them (ASIO), read once the stream ran.
+    pub device_latency: Option<DeviceLatency>,
 }
 
 impl Player {
@@ -311,6 +320,7 @@ impl Player {
                             device_channels: config.channels,
                             device_buffer: buffer,
                             silent: false,
+                            device_latency: if asio { devices::asio_latency() } else { None },
                         }
                     }
                     None => {
@@ -389,6 +399,7 @@ impl Player {
             device_channels: 0,
             device_buffer: None,
             silent: true,
+            device_latency: None,
         }
     }
 
@@ -413,6 +424,7 @@ impl Player {
             device_channels: 0,
             device_buffer: None,
             silent: true,
+            device_latency: None,
         }
     }
 

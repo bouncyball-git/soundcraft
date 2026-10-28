@@ -138,6 +138,23 @@ fn asio_driver_buffers(min: Option<u32>, max: Option<u32>) -> Option<(Vec<u32>, 
     (!choices.is_empty()).then_some((choices, sizes.preferred))
 }
 
+/// The loaded ASIO driver's input and output latency (an open ASIO stream holds the driver).
+#[cfg(feature = "asio")]
+pub(crate) fn asio_latency() -> Option<crate::DeviceLatency> {
+    match soundcraft_asio_host::loaded_latencies() {
+        Ok(l) => Some(crate::DeviceLatency { input: l.input, output: l.output }),
+        Err(e) => {
+            log::warn!("ASIO latency: {e}");
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "asio"))]
+pub(crate) fn asio_latency() -> Option<crate::DeviceLatency> {
+    None
+}
+
 #[cfg(not(feature = "asio"))]
 fn asio_driver_buffers(_min: Option<u32>, _max: Option<u32>) -> Option<(Vec<u32>, u32)> {
     None

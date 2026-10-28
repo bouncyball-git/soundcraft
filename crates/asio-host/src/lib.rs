@@ -1,14 +1,15 @@
 //! SoundCraft's ASIO driver helpers.
 //!
-//! cpal opens ASIO streams but does not expose two things a DAW needs from the driver: the buffer
-//! sizes it accepts (cpal reports only the minimum and maximum, not the driver's preferred size or
-//! its step) and the driver's own control panel. Both are ASIO SDK calls on the *loaded* driver.
+//! cpal opens ASIO streams but does not expose what a DAW needs to show from the driver: the
+//! buffer sizes it accepts (cpal reports only the minimum and maximum, not the driver's preferred
+//! size or its step), its input and output latency, and its own control panel. All are ASIO SDK
+//! calls on the *loaded* driver.
 //! ASIO allows one loaded driver per process; cpal loads it (through asio-sys) while it lists a
 //! device and while a stream is open, so these helpers act on that driver and never load one.
 //!
 //! Like `soundcraft-au-host`, this is an isolated `unsafe` crate (craftrules never-crash):
-//! `unsafe` is denied crate-wide and allowed only in the private `ffi` module (two declarations
-//! of ASIO SDK functions compiled by asio-sys). The public API is safe, returns `Result` and never
+//! `unsafe` is denied crate-wide and allowed only in the private `ffi` module (declarations of
+//! ASIO SDK functions compiled by asio-sys). The public API is safe, returns `Result` and never
 //! panics.
 //!
 //! Off Windows with the MSVC toolchain the crate compiles to stubs that report "unsupported".
@@ -101,6 +102,30 @@ pub fn loaded_buffer_sizes() -> Result<BufferSizes, AsioError> {
         let (min, max, preferred, granularity) = ffi::get_buffer_size().map_err(code_error)?;
         let frames = |n: i32| u32::try_from(n).map_err(|_| AsioError::Driver(n));
         Ok(BufferSizes { min: frames(min)?, max: frames(max)?, preferred: frames(preferred)?, granularity })
+    }
+    #[cfg(not(all(windows, target_env = "msvc")))]
+    {
+        Err(AsioError::Unsupported)
+    }
+}
+
+/// The loaded driver's latency in frames, as it reports it (`ASIOGetLatencies`): from the input
+/// jack to the samples the host receives, and from the samples the host hands over to the output
+/// jack. Drivers usually include their buffer size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Latencies {
+    pub input: u32,
+    pub output: u32,
+}
+
+/// The loaded driver's input and output latency. Valid once the driver's buffers exist (an open
+/// stream); a negative report is an error.
+pub fn loaded_latencies() -> Result<Latencies, AsioError> {
+    #[cfg(all(windows, target_env = "msvc"))]
+    {
+        let (input, output) = ffi::get_latencies().map_err(code_error)?;
+        let frames = |n: i32| u32::try_from(n).map_err(|_| AsioError::Driver(n));
+        Ok(Latencies { input: frames(input)?, output: frames(output)? })
     }
     #[cfg(not(all(windows, target_env = "msvc")))]
     {

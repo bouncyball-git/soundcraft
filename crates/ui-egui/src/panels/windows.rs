@@ -516,8 +516,20 @@ pub fn playback_engine(app: &mut SoundApp, ctx: &egui::Context) {
                 device_combo(ui, "pe-out", "ASIO driver", &mut draft.output, sys.map_or(&[][..], |s| &s.outputs));
                 draft.input = draft.output.clone();
                 ui.end_row();
-                ui.label("Input device");
-                ui.label(egui::RichText::new("The same driver (ASIO uses one driver for input and output)").color(t.text_dim));
+                // The open driver's own latency (ASIO uses this one driver for input and output).
+                ui.label("Latency");
+                let open = app.player.as_ref().filter(|p| p.is_asio() && draft.output.as_ref().is_none_or(|o| *o == p.device_name));
+                match open.and_then(|p| p.device_latency.map(|l| (l, p.device_rate))) {
+                    Some((l, rate)) => {
+                        let ms = |frames: u32| f64::from(frames) * 1000.0 / f64::from(rate.max(1));
+                        ui.label(format!("input: {:.1} ms    output: {:.1} ms", ms(l.input), ms(l.output)))
+                            .on_hover_text(format!("As the driver reports it: {} and {} samples at {rate} Hz", l.input, l.output));
+                    }
+                    None => {
+                        ui.label(egui::RichText::new("input: – ms    output: – ms").color(t.text_dim))
+                            .on_hover_text("Apply to open this driver; its latency shows once it runs");
+                    }
+                }
                 ui.end_row();
             } else {
                 ui.label("Output device");
