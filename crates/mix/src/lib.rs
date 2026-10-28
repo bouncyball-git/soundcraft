@@ -86,7 +86,7 @@ use strip::{BusBuf, LiveInput, SlotCtx, Strip, apply_params, contain_failure, no
 #[cfg(test)]
 use strip::{DelayLine, MAX_LATENCY};
 use threads::run_strips;
-pub use threads::{mark_audio_thread, on_audio_thread};
+pub use threads::{mark_audio_thread, on_audio_thread, while_audio_thread};
 
 /// Default (stereo) main mix width. The actual width is [`main_channels`].
 pub const MAIN_CHANNELS: usize = 2;

@@ -9,6 +9,21 @@ pub fn mark_audio_thread() {
     AUDIO_THREAD.set(true);
 }
 
+/// Run `f` marked as the audio thread, then restore this thread's own mark (also when `f`
+/// unwinds). For callbacks that may run on the audio thread or on another: cpal's error callbacks,
+/// which an ASIO driver can call from whatever thread called into it, the UI thread included. A
+/// lasting mark there would make the logger drop that thread's records from then on.
+pub fn while_audio_thread<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            AUDIO_THREAD.set(self.0);
+        }
+    }
+    let _restore = Restore(AUDIO_THREAD.replace(true));
+    f()
+}
+
 /// True on the thread [`mark_audio_thread`] marked, and on a worker while it renders strips for
 /// it. Lock-free and allocation-free.
 pub fn on_audio_thread() -> bool {
