@@ -23,8 +23,9 @@ cpal.workspace = true
 cpal = { workspace = true, features = ["wasm-bindgen"] }
 
 [features]
-# ASIO on Windows (cpal's ASIO host). Off by default: building it downloads Steinberg's ASIO SDK
-# (its own licence) and needs LLVM (libclang) for the bindings. `cargo build -p soundcraft --features asio`.
+# ASIO on Windows (cpal's ASIO host). Off for this crate; the `soundcraft` app turns it on by
+# default. Building it downloads Steinberg's ASIO SDK (its own licence) and needs LLVM (libclang)
+# for the bindings.
 asio = ["cpal/asio"]
 
 [dev-dependencies]

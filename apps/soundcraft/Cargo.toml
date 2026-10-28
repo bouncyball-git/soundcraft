@@ -11,6 +11,9 @@ default-run = "soundcraft"
 workspace = true
 
 [features]
+# ASIO is on by default; it only builds anything on Windows (cpal's ASIO backend is Windows-only).
+# `--no-default-features` builds without it.
+default = ["asio"]
 # ASIO audio devices on Windows (see soundcraft-playback's `asio` feature).
 asio = ["soundcraft-playback/asio"]
 

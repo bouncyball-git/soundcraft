@@ -157,6 +157,10 @@ cargo run --release -p soundcraft -- --demo     # opens the demo song
 
 Linux needs the ALSA headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora).
 
+Windows builds the app with ASIO support, which needs LLVM (`winget install LLVM.LLVM`); the
+first build downloads Steinberg's ASIO SDK, under Steinberg's own licence. Build without ASIO with
+`cargo run --release -p soundcraft --no-default-features -- --demo`.
+
 The web build:
 
 ```sh
